@@ -1,0 +1,17 @@
+[project]
+name = "pi-speak"
+version = "0.1.0"
+description = "Local speech-to-text for the pi speak extension (faster-whisper, optional CUDA libs)"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.2,<2",
+]
+
+[project.optional-dependencies]
+# NVIDIA only: bundles the CUDA runtime so no system CUDA install is needed.
+# Install with `uv sync --extra gpu`. Without it, stt.py uses the CPU path
+# (still near real-time on a modern CPU).
+gpu = [
+    "nvidia-cublas-cu12>=12.9",
+    "nvidia-cudnn-cu12>=9.27",
+]

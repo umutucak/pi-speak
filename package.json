@@ -1,0 +1,14 @@
+{
+  "name": "pi-speak",
+  "version": "0.1.0",
+  "description": "Dictate prompts into pi: local whisper transcription, cleaned and sent as a message to the used model.",
+  "keywords": ["pi-package"],
+  "license": "GPL-3.0",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
