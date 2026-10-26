@@ -43,7 +43,21 @@ function nvidiaLibPath(): string {
   }
   return "";
 }
-const NVIDIA_LIBS = nvidiaLibPath();
+
+// Self-heal: fresh installs have no .venv yet — create it on first use (GPU extra only if an NVIDIA GPU is present)
+async function ensureVenv(): Promise<void> {
+  if (fs.existsSync(PY)) return;
+  const hasGpu = await new Promise((resolve) => {
+    const p = spawn("nvidia-smi", ["-L"], { stdio: "ignore" });
+    p.on("error", () => resolve(false));
+    p.on("close", (c) => resolve(c === 0));
+  });
+  await new Promise<void>((resolve, reject) => {
+    const p = spawn("uv", ["sync", ...(hasGpu ? ["--extra", "gpu"] : [])], { cwd: HERE, stdio: "ignore" });
+    p.on("error", reject);
+    p.on("close", (c) => (c === 0 ? resolve() : reject(new Error(`uv sync exited ${c}`))));
+  });
+}
 
 const CLEAN_PROMPT = `You are the post-processor for a voice-dictation pipeline feeding a coding assistant. Input: raw speech-to-text. Output: the exact message to send.
 Rules:
@@ -59,10 +73,11 @@ let api: ExtensionAPI | undefined;
 
 function runStt(file: string): Promise<string> {
   return new Promise((resolve, reject) => {
+    const libs = nvidiaLibPath();
     const py = spawn(PY, [STT, file], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: NVIDIA_LIBS
-        ? { ...process.env, LD_LIBRARY_PATH: NVIDIA_LIBS + ":" + (process.env.LD_LIBRARY_PATH ?? "") }
+      env: libs
+        ? { ...process.env, LD_LIBRARY_PATH: libs + ":" + (process.env.LD_LIBRARY_PATH ?? "") }
         : process.env,
     });
     let out = "";
@@ -107,6 +122,8 @@ async function speak(ctx: ExtensionContext) {
   const tmp = path.join(os.tmpdir(), `speak-${Date.now()}.raw`);
   let rec: ReturnType<typeof spawn> | undefined;
   try {
+    if (!fs.existsSync(PY)) ctx.ui.notify("First run: setting up Python environment (one-time, ~30s)", "info");
+    await ensureVenv();
     rec = spawn(
       "ffmpeg",
       ["-hide_banner", "-loglevel", "error", "-y", ...FFMPEG_INPUT, "-ar", "16000", "-ac", "1", "-f", "s16le", tmp],

@@ -17,10 +17,9 @@ Install it as a pi package:
 
 ```bash
 pi install git:github.com/umutucak/pi-speak
-cd ~/.pi/agent/git/github.com/umutucak/pi-speak && uv sync   # creates .venv
 ```
 
-**If you have an NVIDIA GPU**, add the bundled CUDA runtime libs with `uv sync --extra gpu` (no system CUDA install needed).
+The Python venv builds itself on first use (one-time, a few seconds). **If you have an NVIDIA GPU**, the bundled CUDA runtime libs are included automatically (no system CUDA install needed).
 
 The whisper model (~140 MB) downloads itself on first use.
 
