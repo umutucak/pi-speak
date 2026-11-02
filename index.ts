@@ -174,12 +174,14 @@ async function speak(ctx: ExtensionContext) {
       return;
     }
     const existing = ctx.ui.getEditorText();
+    // deliverAs: required when the agent is streaming (pi throws without it);
+    // ignored when idle, so dictation steers mid-run or starts a turn otherwise.
     if (existing.trim()) {
       // user had text queued in the editor — send it together with the dictation
-      api!.sendUserMessage(`${existing.trim()}\n${text}`);
+      api!.sendUserMessage(`${existing.trim()}\n${text}`, { deliverAs: "steer" });
       ctx.ui.setEditorText("");
     } else {
-      api!.sendUserMessage(text);
+      api!.sendUserMessage(text, { deliverAs: "steer" });
     }
     ctx.ui.notify("Sent", "info");
   } catch (e) {

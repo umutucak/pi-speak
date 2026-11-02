@@ -25,6 +25,8 @@ ffmpeg (mic → 16 kHz s16le mono, raw PCM to /tmp; ALSA/AVFoundation/dshow per 
 
 6. **`pi.sendUserMessage`** is the send path (ExtensionAPI, `dist/core/extensions/types.d.ts`). It's documented in `docs/extensions.md`. If you revert to editor-insert, use `ctx.ui.setEditorText()`.
 
+7. **`sendUserMessage` throws while the agent is streaming unless you pass `deliverAs`** — pi's `prompt()` requires `streamingBehavior` (`'steer' | 'followUp'`) mid-run and rejects bare calls (surfaces as "Extension runtime error"). We always pass `{ deliverAs: "steer" }`: ignored when idle, steers mid-run when busy.
+
 ## Tuning loop
 
 The cleanup prompt (`CLEAN_PROMPT` in `index.ts`) is the main quality lever. It is deliberately opinionated: filler removal, technical-term repair (with concrete examples), strict punctuation (question marks for every question), no rephrasing. **When a bad transcription case appears, add it as an example in rule 2** — that's the established tuning mechanism.
