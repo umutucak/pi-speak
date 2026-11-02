@@ -33,4 +33,4 @@ Works on Linux, haven't tested on macOS or Windows.
 
 The cleanup pass runs on **whatever model your pi session is currently using** — no extra model to install or configure. Switch models in pi and the cleanup quality switches with it.
 
-See `AGENT.md` for the internals, gotchas, and tuning notes.
+See `AGENTS.md` for the internals, gotchas, and tuning notes.
