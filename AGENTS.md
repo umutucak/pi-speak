@@ -6,22 +6,35 @@ Alt+R (or `/speak`) → record mic → local whisper STT → LLM cleanup → **s
 
 ```
 ffmpeg (mic → 16 kHz s16le mono, raw PCM to /tmp; ALSA/AVFoundation/dshow per platform)
-  → stt.py (faster-whisper base.en, CUDA float16, CPU-int8 fallback)
+  → whisper daemon (stt.py --serve: faster-whisper base.en, CPU int8, warm for the session)
   → ctx.modelRegistry.complete() with CLEAN_PROMPT (the session's current model)
   → pi.sendUserMessage(text)   # if editor had text, it's prepended and both are sent
 ```
 
 ## Non-obvious facts (not derivable from the code)
 
-1. **python 3.14 dlopen quirk (the #1 trap):** setting `os.environ["LD_LIBRARY_PATH"]` at runtime does NOT reach `dlopen` in this environment — verified empirically. The CUDA libs therefore must be passed in the **spawn env** (`nvidiaLibPath()` in `index.ts`). `stt.py` also sets it (harmless, works on other systems). If whisper suddenly fails with `libcublas.so.12 not found`, this is why.
+1. **Whisper runs CPU-only, as a session-scoped daemon.** The RTX 3090 is fully
+occupied by local LLM serving (~23.8/24.5 GiB), so CUDA never fits — the GPU
+path was dropped on 2026-11-06. `stt.py --serve` loads base.en int8 once
+(~0.7 s, ~150 MB RAM); the extension spawns it on `pi.on("session_start")` and
+kills it on `session_shutdown`, and the daemon also exits on stdin EOF (parent
+death). Requests are file paths on stdin, one text line out — safe to write
+before "ready" (stdin buffers until the model finishes loading). If a dictation
+finds the daemon dead, `transcribe()` lazily respawns it and falls back to a
+one-shot `stt.py <file>` run on failure.
 
-2. **venv layout is split:** `faster_whisper` lives in `.venv/lib64/...`, the `nvidia/*` CUDA libs in `.venv/lib/...` (both exist, both needed — only when the gpu extra is installed). That's why both dirs are scanned. Python deps are managed with **uv** (`pyproject.toml` + `uv.lock`); `uv sync` reproduces the CPU-only venv, `uv sync --extra gpu` adds the NVIDIA CUDA runtime (the `nvidia-*-cu12` wheels). `ensureVenv()` in `index.ts` runs this automatically on first use (with `--extra gpu` when `nvidia-smi` works), so a fresh `pi install` needs no manual step. The CPU int8 path is fully supported (near real-time on a modern CPU) and is the default.
+2. **python 3.14 dlopen quirk (historical):** setting `os.environ["LD_LIBRARY_PATH"]` at
+runtime does NOT reach `dlopen` — this is why CUDA libs used to be passed via the spawn
+env. Irrelevant now (CPU-only, no CUDA wheels), kept in case a GPU path is re-added.
 
-3. **VRAM budget:** do not assume the GPU is free — other workloads (e.g. local LLM servers) may be occupying it. Probe the actual state with `nvidia-smi` before and after a transcription. If free VRAM is insufficient, the CUDA load fails and `stt.py` falls back to CPU int8 (slower, still fine).
+3. **venv layout:** `faster_whisper` lives in `.venv/lib64/...` (a `lib/...` dir exists
+too). Python deps are managed with **uv** (`pyproject.toml` + `uv.lock`); `uv sync`
+reproduces the CPU-only venv. `ensureVenv()` in `index.ts` runs this automatically on
+first use, so a fresh install needs no manual step.
 
 4. **Mic (cross-platform via ffmpeg):** input is per-platform — Linux ALSA `default`, macOS AVFoundation `:0`, Windows dshow `Microphone`; override all with `SPEAK_DEVICE`. `ffmpeg` is killed with SIGTERM on SPACE; the file is raw PCM (no header), so no finalization needed. Requires `ffmpeg` on PATH.
 
-5. **Cleanup model = whatever model the pi session is on** (via `ctx.modelRegistry.complete(ctx.model, ...)`). Not Ollama, not a fixed model. Quality of cleanup varies with it.
+5. **Cleanup model = whatever model the pi session is on** (via `ctx.modelRegistry.complete(ctx.model, ...)`). Not Ollama, not a fixed model. Quality of cleanup varies with it. The call passes **no reasoning option** and the session thinking level is never injected into extension `complete()` calls — reasoning state comes from pi-ai's per-API defaults, which differ per provider (see "Measured latency").
 
 6. **`pi.sendUserMessage`** is the send path (ExtensionAPI, `dist/core/extensions/types.d.ts`). It's documented in `docs/extensions.md`. If you revert to editor-insert, use `ctx.ui.setEditorText()`.
 
@@ -37,9 +50,10 @@ The cleanup prompt (`CLEAN_PROMPT` in `index.ts`) is the main quality lever. It 
 cd ~/.pi/agent/extensions/pi-speak
 # record 3 s of mic to raw PCM (add -f/-i args for non-Linux or non-default mics):
 ffmpeg -hide_banner -loglevel error -y -t 3 -f alsa -i default -ar 16000 -ac 1 -f s16le /tmp/test.raw
-# transcribe (LDP must be set in the environment, see fact #1):
-LDP=$(find .venv -path "*site-packages/nvidia/*/lib" -type d | sort | tr '\n' ':')
-env LD_LIBRARY_PATH="${LDP%:}" .venv/bin/python stt.py /tmp/test.raw
+# transcribe, one-shot:
+.venv/bin/python stt.py /tmp/test.raw
+# or via the daemon protocol (start serve, write path, read answer):
+printf '/tmp/test.raw\n' | .venv/bin/python stt.py --serve
 # check the extension loads (run from pi's package dir, e.g. `$(npm root -g)/@earendil-works/pi-coding-agent`;
 # PI below = that dir — jiti aliases replace the old node_modules symlinks):
 cd "$(npm root -g)/@earendil-works/pi-coding-agent"
@@ -58,8 +72,31 @@ console.log('ok');
 
 pi-tui is not a global package — it lives inside pi-coding-agent's `node_modules/@earendil-works/`.
 
+## Measured latency (2026-11-05, local endpoint, RTX 3090)
+
+Cleanup LLM step, non-streaming `/v1/chat/completions`, 170 prompt tokens
+(full `CLEAN_PROMPT` + ~30-word raw dictation), request body exactly as
+`ModelRegistry.complete()` produces it:
+
+| reasoning state | Time (2 runs) | Output tokens |
+|---|---|---|
+| thinking OFF (`enable_thinking: false`) — what pi-speak gets | 0.54 / 0.55 s | 41 / 41 |
+| thinking ON (endpoint server default) | 3.10 / 5.53 s | 364 / 657 |
+| thinking ON (explicit kwarg) | 3.23 / 9.68 s | 381 / 1144 |
+
+- The LLM step is the cheapest piece when thinking is off (~0.5 s). The whisper
+  cold load (~0.7 s) is paid once per pi session — the daemon keeps the model
+  warm in RAM; a warm dictation's transcription is ~0.5 s for a few seconds of
+  audio (base.en int8, near real-time on the CPU).
+- The API separates thinking into the message's `reasoning` field
+  (`usage.completion_tokens_details.reasoning_tokens`); `content` stays clean,
+  and pi-ai maps that field to a thinking block which the text filter drops —
+  on this path thinking-on is pure latency, no quality impact.
+- Which state a given session model lands in depends on the provider's
+  per-model defaults — check your own endpoint before assuming cleanup is fast.
+
 ## Possible extensions (not done, deliberate)
 
-- Warm whisper daemon to skip the ~2 s model load per dictation (currently loaded per use on purpose — simpler, and VRAM may be shared with other GPU workloads).
 - ESC currently just cancels the recording; could also discard the LLM cleanup.
-- Bigger whisper model (small.en ≈ 465 MB) if accuracy needs it and VRAM allows.
+- Bigger whisper model (small.en ≈ 465 MB, CPU int8) if accuracy needs it — still
+  near-real-time per request, but the once-per-session load gets slower.

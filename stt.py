@@ -1,36 +1,39 @@
 #!/usr/bin/env python3
-"""Transcribe raw 16 kHz s16le mono PCM with faster-whisper. Prints text to stdout.
+"""Transcribe raw 16 kHz s16le mono PCM with faster-whisper (CPU, int8).
 
-Usage: stt.py <file.raw>
+One-shot:  stt.py <file.raw>          — print transcription, exit.
+Daemon:    stt.py --serve             — line protocol on stdio: read a path,
+    print its transcription, repeat; exits when stdin closes (i.e. when the
+    spawning pi session dies). Model is loaded once, so the ~0.9 s cold load
+    is paid once per session instead of per dictation.
 """
-import os
 import sys
-
-# Expose the nvidia CUDA libs bundled in this venv before ctranslate2 loads.
-_here = os.path.dirname(os.path.abspath(__file__))
-_ver = f"python{sys.version_info[0]}.{sys.version_info[1]}"
-for _lib in ("lib", "lib64"):
-    _n = os.path.join(_here, ".venv", _lib, _ver, "site-packages", "nvidia")
-    if not os.path.isdir(_n):
-        continue
-    for _sub in sorted(os.listdir(_n)):
-        _p = os.path.join(_n, _sub, "lib")
-        if os.path.isdir(_p):
-            os.environ["LD_LIBRARY_PATH"] = _p + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
 
 import numpy as np
 from faster_whisper import WhisperModel
 
 
-def main() -> None:
-    with open(sys.argv[1], "rb") as f:
+def transcribe(model: WhisperModel, file: str) -> str:
+    with open(file, "rb") as f:
         audio = np.frombuffer(f.read(), dtype=np.int16).astype(np.float32) / 32768.0
-    try:
-        model = WhisperModel("base.en", device="cuda", compute_type="float16")
-    except Exception:
-        model = WhisperModel("base.en", device="cpu", compute_type="int8")
     segs, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=True)
-    print(" ".join(s.text.strip() for s in segs).strip())
+    return " ".join(s.text.strip() for s in segs).strip()
+
+
+def main() -> None:
+    model = WhisperModel("base.en", device="cpu", compute_type="int8")
+    if "--serve" in sys.argv:
+        print("ready", flush=True)
+        for line in sys.stdin:  # stdin EOF (pi exit) ends the daemon
+            p = line.strip()
+            if not p:
+                continue
+            try:
+                print(transcribe(model, p), flush=True)
+            except Exception as e:  # keep serving; request-level failure
+                print(f"ERR {e}", flush=True)
+    else:
+        print(transcribe(model, sys.argv[1]))
 
 
 main()

@@ -2,8 +2,13 @@
  * pi-speak — dictate prompts into pi.
  *
  * Alt+R (or /speak): starts recording from the mic, shows "press SPACE to stop".
- * On SPACE: stops recording, transcribes locally (faster-whisper, GPU),
- * cleans filler words with the current model, inserts text into the editor.
+ * On SPACE: stops recording, transcribes locally, cleans filler words with
+ * the current model, inserts text into the editor.
+ *
+ * Whisper runs as a CPU-int8 daemon: spawned on session_start (if the venv
+ * exists), serving transcriptions over stdio until the session ends. If it
+ * dies, dictation lazily respawns or falls back to a one-shot run. The venv
+ * is CPU-only, so no CUDA lib setup is needed.
  *
  * Mic: system default per platform (ALSA "default" on Linux, avfoundation ":0" on macOS,
  * dshow "Microphone" on Windows); override with SPEAK_DEVICE.
@@ -27,33 +32,11 @@ const FFMPEG_INPUT = (() => {
   return ["-f", "alsa", "-i", d ?? "default"]; // Linux
 })();
 
-// nvidia CUDA libs bundled in the venv (python3.14 dlopen won't see os.environ set at runtime)
-function nvidiaLibPath(): string {
-  for (const lib of ["lib", "lib64"]) {
-    const base = path.join(HERE, ".venv", lib);
-    const pydir = fs.existsSync(base) ? fs.readdirSync(base).find((d) => d.startsWith("python")) : undefined;
-    if (!pydir) continue;
-    const n = path.join(base, pydir, "site-packages", "nvidia");
-    if (!fs.existsSync(n)) continue;
-    return fs
-      .readdirSync(n)
-      .map((s) => path.join(n, s, "lib"))
-      .filter((p) => fs.existsSync(p))
-      .join(":");
-  }
-  return "";
-}
-
-// Self-heal: fresh installs have no .venv yet — create it on first use (GPU extra only if an NVIDIA GPU is present)
+// Self-heal: fresh installs have no .venv yet — create it on first use (CPU-only)
 async function ensureVenv(): Promise<void> {
   if (fs.existsSync(PY)) return;
-  const hasGpu = await new Promise((resolve) => {
-    const p = spawn("nvidia-smi", ["-L"], { stdio: "ignore" });
-    p.on("error", () => resolve(false));
-    p.on("close", (c) => resolve(c === 0));
-  });
   await new Promise<void>((resolve, reject) => {
-    const p = spawn("uv", ["sync", ...(hasGpu ? ["--extra", "gpu"] : [])], { cwd: HERE, stdio: "ignore" });
+    const p = spawn("uv", ["sync"], { cwd: HERE, stdio: "ignore" });
     p.on("error", reject);
     p.on("close", (c) => (c === 0 ? resolve() : reject(new Error(`uv sync exited ${c}`))));
   });
@@ -71,24 +54,75 @@ Return only the final message text. No quotes, no commentary.`;
 let busy = false;
 let api: ExtensionAPI | undefined;
 
-function runStt(file: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const libs = nvidiaLibPath();
-    const py = spawn(PY, [STT, file], {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: libs
-        ? { ...process.env, LD_LIBRARY_PATH: libs + ":" + (process.env.LD_LIBRARY_PATH ?? "") }
-        : process.env,
-    });
-    let out = "";
-    let err = "";
-    py.stdout.on("data", (d) => (out += d));
-    py.stderr.on("data", (d) => (err += d));
-    py.on("error", reject);
-    py.on("close", (code) =>
-      code === 0 ? resolve(out.trim()) : reject(new Error(`stt exited ${code}: ${err.slice(-300)}`)),
-    );
+// --- whisper daemon (model warm in RAM for the lifetime of the session) ---
+let daemon: ReturnType<typeof spawn> | undefined;
+let pending: Array<{ file: string; resolve: (t: string) => void; reject: (e: Error) => void }> = [];
+let outBuf = "";
+
+function rejectAll(err: Error) {
+  for (const p of pending.splice(0)) p.reject(err);
+  pending = [];
+  outBuf = "";
+  daemon = undefined;
+}
+
+/* Line protocol: each dictation writes "<path>\n" to the daemon's stdin (safe even
+ * while the model is still loading — the stdin buffer holds it) and the daemon
+ * answers one line of text. Requests are resolved in FIFO order against pending[]. */
+function attachDaemon(d: ReturnType<typeof spawn>) {
+  d.stdout.on("data", (chunk: Buffer) => {
+    outBuf += chunk.toString();
+    let i: number;
+    while ((i = outBuf.indexOf("\n")) !== -1) {
+      const line = outBuf.slice(0, i).trim();
+      outBuf = outBuf.slice(i + 1);
+      if (!line) continue;
+      const req = pending.shift();
+      if (req) req.resolve(line);
+    }
   });
+  d.on("error", (e) => rejectAll(e));
+  d.on("close", (code) => rejectAll(new Error(`whisper daemon exited (${code})`)));
+}
+
+// Spawn (or lazily respawn) the warm daemon. Returns immediately: a request written
+// before "ready" simply waits on the stdin buffer until the model finishes loading.
+function startDaemon(): void {
+  if (daemon?.exitCode === null) return;
+  daemon = spawn(PY, [STT, "--serve"], { cwd: HERE, stdio: ["pipe", "pipe", "inherit"] });
+  pending = [];
+  attachDaemon(daemon);
+}
+
+function stopDaemon() {
+  daemon?.kill("SIGTERM");
+  daemon = undefined;
+}
+
+function daemonTranscribe(file: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    daemon!.stdin.write(file + "\n", (e) => e && reject(e));
+    pending.push({ file, resolve, reject });
+  });
+}
+
+// Warm daemon, else (or on failure) one-shot fallback — same model, one process
+async function transcribe(file: string): Promise<string> {
+  startDaemon();
+  if (daemon && daemon.exitCode === null) {
+    try {
+      return await daemonTranscribe(file);
+    } catch {
+      /* fall through to one-shot */
+    }
+  }
+    return new Promise((resolve, reject) => {
+      const py = spawn(PY, [STT, file], { stdio: ["ignore", "pipe", "inherit"] });
+      let out = "";
+      py.stdout.on("data", (d) => (out += d));
+      py.on("error", reject);
+      py.on("close", (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`stt exited ${code}`))));
+    });
 }
 
 async function cleanWithLlm(ctx: ExtensionContext, raw: string): Promise<string> {
@@ -157,7 +191,7 @@ async function speak(ctx: ExtensionContext) {
     const text = await ctx.ui.custom((tui, theme, _kb, done) => {
       const loader = new BorderedLoader(tui, theme, `Transcribing with ${ctx.model!.id}...`);
       loader.onAbort = () => done(null);
-      runStt(tmp)
+      transcribe(tmp)
         .then((raw) =>
           raw
             ? cleanWithLlm(ctx, raw)
@@ -204,4 +238,11 @@ export default function (pi: ExtensionAPI) {
     description: describe,
     handler: (_args, ctx) => speak(ctx),
   });
+  // Smart loading: warm the whisper model when a session starts (load paid once,
+  // not per dictation), offload when it ends. If the venv isn't built yet, skip —
+  // the first dictation builds it and warms lazily.
+  pi.on("session_start", async () => {
+    if (fs.existsSync(PY)) startDaemon();
+  });
+  pi.on("session_shutdown", async () => stopDaemon());
 }
