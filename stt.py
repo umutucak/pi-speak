@@ -23,7 +23,7 @@ def transcribe(model: WhisperModel, file: str) -> str:
 def main() -> None:
     model = WhisperModel("base.en", device="cpu", compute_type="int8")
     if "--serve" in sys.argv:
-        print("ready", flush=True)
+        # No banner line: every stdout line is a reply to one stdin path.
         for line in sys.stdin:  # stdin EOF (pi exit) ends the daemon
             p = line.strip()
             if not p:

@@ -116,13 +116,13 @@ async function transcribe(file: string): Promise<string> {
       /* fall through to one-shot */
     }
   }
-    return new Promise((resolve, reject) => {
-      const py = spawn(PY, [STT, file], { stdio: ["ignore", "pipe", "inherit"] });
-      let out = "";
-      py.stdout.on("data", (d) => (out += d));
-      py.on("error", reject);
-      py.on("close", (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`stt exited ${code}`))));
-    });
+  return new Promise((resolve, reject) => {
+    const py = spawn(PY, [STT, file], { stdio: ["ignore", "pipe", "inherit"] });
+    let out = "";
+    py.stdout.on("data", (d) => (out += d));
+    py.on("error", reject);
+    py.on("close", (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`stt exited ${code}`))));
+  });
 }
 
 async function cleanWithLlm(ctx: ExtensionContext, raw: string): Promise<string> {

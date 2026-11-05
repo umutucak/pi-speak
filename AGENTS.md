@@ -18,8 +18,9 @@ occupied by local LLM serving (~23.8/24.5 GiB), so CUDA never fits — the GPU
 path was dropped on 2026-11-06. `stt.py --serve` loads base.en int8 once
 (~0.7 s, ~150 MB RAM); the extension spawns it on `pi.on("session_start")` and
 kills it on `session_shutdown`, and the daemon also exits on stdin EOF (parent
-death). Requests are file paths on stdin, one text line out — safe to write
-before "ready" (stdin buffers until the model finishes loading). If a dictation
+death). Requests are file paths on stdin, exactly one text line out — safe to write while the model is still
+loading (stdin buffers); stt.py prints no banner line, so every line it emits is a reply
+to one request. If a dictation
 finds the daemon dead, `transcribe()` lazily respawns it and falls back to a
 one-shot `stt.py <file>` run on failure.
 
