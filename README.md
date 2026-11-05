@@ -19,7 +19,7 @@ Install it as a pi package:
 pi install git:github.com/umutucak/pi-speak
 ```
 
-The Python venv builds itself on first use (one-time, a few seconds). **If you have an NVIDIA GPU**, the bundled CUDA runtime libs are included automatically (no system CUDA install needed).
+The Python venv builds itself on first use (one-time, a few seconds). Transcription is CPU-only — no GPU or CUDA needed; `base.en` int8 runs near real-time on a modern CPU.
 
 The whisper model (~140 MB) downloads itself on first use.
 
@@ -29,7 +29,7 @@ Works on Linux, haven't tested on macOS or Windows.
 
 ## How it works
 
-`ffmpeg` (mic → 16 kHz mono PCM) → `stt.py` (whisper `base.en`, GPU if available, CPU otherwise) → one small LLM call with a strict "clean but don't rewrite" prompt → `pi.sendUserMessage`. No daemons, no servers, ~200 lines total.
+`ffmpeg` (mic → 16 kHz mono PCM) → `stt.py` (whisper `base.en` int8, CPU; the model loads once per pi session and stays warm) → one small LLM call with a strict "clean but don't rewrite" prompt → `pi.sendUserMessage`. No external services, ~200 lines total.
 
 The cleanup pass runs on **whatever model your pi session is currently using** — no extra model to install or configure. Switch models in pi and the cleanup quality switches with it.
 
