@@ -166,17 +166,23 @@ async function speak(ctx: ExtensionContext) {
     await new Promise((r) => setTimeout(r, 300));
     if (rec!.exitCode !== null) throw new Error(`mic failed to open (device ${process.env.SPEAK_DEVICE ?? "default"})`);
 
-    // Record until SPACE (or ESC to cancel)
-    await ctx.ui.custom((_tui, _theme, _kb, done) => ({
+    // SPACE stops the recording and continues; ESC cancels the whole thing
+    const recResult = await ctx.ui.custom((_tui, _theme, _kb, done) => ({
       render: () => ["  \u25cf REC \u2014 speak now, press SPACE to stop (ESC cancels)"],
       handleInput: (data: string) => {
-        if (data === " " || data === "\u001b") done();
+        if (data === " ") done("stop");
+        else if (data === "\u001b") done("cancel");
       },
       invalidate: () => {},
     }));
 
     rec!.kill("SIGTERM");
     await new Promise((r) => rec!.once("exit", r));
+
+    if (recResult === "cancel") {
+      ctx.ui.notify("Cancelled", "info");
+      return;
+    }
 
     const size = (await import("node:fs")).promises
       .stat(tmp)
@@ -197,12 +203,16 @@ async function speak(ctx: ExtensionContext) {
             ? cleanWithLlm(ctx, raw)
                 .then(done)
                 .catch(() => done(raw))
-            : done(null),
+            : done(""),
         )
         .catch(() => done(null));
       return loader;
     });
 
+    if (text === null) {
+      ctx.ui.notify("Cancelled", "info");
+      return;
+    }
     if (!text) {
       ctx.ui.notify("No speech detected", "info");
       return;

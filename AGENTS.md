@@ -98,6 +98,5 @@ Cleanup LLM step, non-streaming `/v1/chat/completions`, 170 prompt tokens
 
 ## Possible extensions (not done, deliberate)
 
-- ESC currently just cancels the recording; could also discard the LLM cleanup.
 - Bigger whisper model (small.en ≈ 465 MB, CPU int8) if accuracy needs it — still
   near-real-time per request, but the once-per-session load gets slower.
