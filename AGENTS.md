@@ -2,6 +2,12 @@
 
 Alt+R (or `/speak`) → record mic → local whisper STT → LLM cleanup → **sent immediately** via `pi.sendUserMessage`.
 
+## Working rules
+
+- Tasks and follow-ups are **GitHub issues, not this file**. When something is
+  worth doing, open an issue (one per thing, short) — don't accumulate TODOs
+  here. This file documents how the code works, not what is pending.
+
 ## Pipeline
 
 ```
@@ -96,7 +102,3 @@ Cleanup LLM step, non-streaming `/v1/chat/completions`, 170 prompt tokens
 - Which state a given session model lands in depends on the provider's
   per-model defaults — check your own endpoint before assuming cleanup is fast.
 
-## Possible extensions (not done, deliberate)
-
-- Bigger whisper model (small.en ≈ 465 MB, CPU int8) if accuracy needs it — still
-  near-real-time per request, but the once-per-session load gets slower.
